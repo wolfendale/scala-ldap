@@ -80,4 +80,14 @@ package object ber {
 
   def ber[A](identifier: Identifier, codec: Codec[A]): Codec[A] =
     Identifier.codec.unit(identifier) ~> sized(codec)
+
+  def berBool: Codec[Boolean] =
+    ber(Identifier(TagClass.Universal, TagType.Boolean), uint8.xmap(
+      { case 0 => false
+        case _ => true
+      }, {
+        case true  => 1
+        case false => 0
+      }
+    ))
 }
