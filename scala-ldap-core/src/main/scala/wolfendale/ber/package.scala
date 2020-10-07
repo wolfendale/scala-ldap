@@ -5,89 +5,134 @@ import scodec.bits._
 import scodec.codecs._
 
 import scala.annotation.tailrec
+import scala.util.Try
 
 package object ber {
 
-  val berInt: Codec[Int] = new Codec[Int] {
-
-    override def sizeBound: SizeBound = SizeBound.bounded(8, 8 * 5)
-
-    override def encode(value: Int): Attempt[BitVector] =
-      runEncode(BitVector.empty, value)
-
-    override def decode(bits: BitVector): Attempt[DecodeResult[Int]] =
-      runDecode(bits, 0)
-
-    @tailrec
-    private def runDecode(buffer: BitVector, value: Int): Attempt[DecodeResult[Int]] = {
-      val result = buffer.sliceToInt(1, 7, signed = false) + (value << 7)
-      if (buffer.get(0)) {
-        runDecode(buffer.drop(8), result)
-      } else Attempt.successful {
-        DecodeResult(result, buffer.drop(8))
+  private val tagNumberCodec: Codec[Int] = {
+    val longTag: Codec[Int] = (constant(bin"11111") ~ BerTagLengthCodec).exmap(
+      { case (_, int)        => Attempt.successful(int) },
+      { case int if int > 30 => Attempt.successful(() -> int)
+      case _               => Attempt.failure(Err("Invalid tag type length"))
       }
-    }
-
-    /* 10000000 */
-    private val MoreOctets = 128
-
-    @tailrec
-    private def runEncode(buffer: BitVector, value: Int): Attempt[BitVector] = {
-      if (buffer.isEmpty) {
-        runEncode(BitVector.fromInt(value & ~MoreOctets, 8), value >> 7)
-      } else if (Integer.compareUnsigned(value, 0) > 0) {
-        runEncode(buffer.splice(0, BitVector.fromInt(value | MoreOctets, 8)), value >> 7)
-      } else Attempt.successful(buffer)
-    }
+    )
+    choice(longTag, uint(5))
   }
 
-  private def sized[A](codec: Codec[A]): Codec[A] = new Codec[A] {
+  def tagged[A](tagClass: TagClass, constructionType: ConstructionType, tagNumber: Int)(codec: Codec[A]): Codec[A] =
+    TagClass.codec.unit(tagClass) ~>
+    ConstructionType.codec.unit(constructionType) ~>
+    tagNumberCodec.unit(tagNumber) ~>
+    new BerContentSizeCodec(codec)
 
-    private def efficientSize(long: Long): Int = {
-      @tailrec
-      def inner(long: Long, size: Int): Int = {
-        val next = long >> 8
-        if (next > 0) inner(next, size + 1) else size
-      }
-      inner(long, 1)
+  val boolean: Codec[Boolean] =
+    tagged(TagClass.Universal, ConstructionType.Primitive, 1) {
+      uint8.xmap(
+        { case 0 => false
+          case _ => true
+        }, {
+          case true  => 1
+          case false => 0
+        }
+      )
     }
 
-    private val lengthCodec: Codec[Long] = {
-      bool.consume {
-        case false => ulong(7)
-        case true  => ulong(7).consume {
-          case 0                 => fail[Long](Err("Content of indefinite length is not supported"))
-          case size if size <= 8 => ulong(size.toInt * 8)
-          case 127               => fail[Long](Err("Initial length value of 0xFF is reserved"))
-          case _                 => fail[Long](Err("Content lengths that are greater than (2 ^ 64) bytes are not supported"))
-        } (efficientSize)
-      } (java.lang.Long.compareUnsigned(_, 127L) > 0)
+  val integer: Codec[Int] =
+    tagged(TagClass.Universal, ConstructionType.Primitive, 2) {
+      new Codec[Int] {
+
+        private val highPrefix = BitVector.high(9)
+        private val lowPrefix = BitVector.low(9)
+
+        @tailrec
+        private def shrink(bits: BitVector): BitVector =
+          if (bits.startsWith(highPrefix) || bits.startsWith(lowPrefix)) shrink(bits.drop(8)) else bits
+
+        override val sizeBound: SizeBound = SizeBound.bounded(8, 4 * 8)
+
+        override def encode(value: Int): Attempt[BitVector] =
+          Attempt.successful(shrink(BitVector.fromInt(value)))
+
+        override def decode(bits: BitVector): Attempt[DecodeResult[Int]] =
+          Attempt.fromTry(Try(bits.toInt(signed = true))).map(DecodeResult(_, BitVector.empty))
+      }
     }
 
-    private val decoder: Decoder[A] =
-      lengthCodec.flatMap(fixedSizeBytes(_, codec))
+  def bitString[A](codec: Codec[A]): Codec[A] =
+    tagged(TagClass.Universal, ConstructionType.Primitive, 3)(new Codec[A] {
 
-    override def sizeBound: SizeBound = SizeBound.atLeast(8)
+      private val decoder = ignore(8) ~> codec
 
-    override def encode(value: A): Attempt[BitVector] = for {
-      content <- codec.encode(value)
-      size    <- lengthCodec.encode(content.size / 8)
-    } yield size ++ content
+      override val sizeBound: SizeBound = SizeBound.atLeast(codec.sizeBound.lowerBound + 8)
 
-    override def decode(bits: BitVector): Attempt[DecodeResult[A]] =
-      decoder.decode(bits)
-  }
+      override def encode(value: A): Attempt[BitVector] = for {
+        bits                 <- codec.encode(value)
+        numberOfTrailingBits =  ((8 - bits.length % 8) % 8).toInt
+        prefix               <- uint8.encode(numberOfTrailingBits)
+      } yield prefix ++ bits ++ BitVector.low(numberOfTrailingBits)
 
-  def ber[A](identifier: Identifier, codec: Codec[A]): Codec[A] =
-    Identifier.codec.unit(identifier) ~> sized(codec)
+      override def decode(bits: BitVector): Attempt[DecodeResult[A]] =
+        decoder.decode(bits)
+    })
 
-  def berBool: Codec[Boolean] =
-    ber(Identifier(TagClass.Universal, TagType.Boolean), uint8.xmap(
-      { case 0 => false
-        case _ => true
-      }, {
-        case true  => 1
-        case false => 0
-      }
-    ))
+  def octetString[A](codec: Codec[A]): Codec[A] =
+    tagged(TagClass.Universal, ConstructionType.Primitive, 4)(byteAligned(codec))
+
+  def berNull: Codec[Unit] =
+    tagged(TagClass.Universal, ConstructionType.Primitive, 5)(provide(()))
+
+  /**
+   * In order to be compliant with X.690, the codec
+   * param must encode a BER encoded TLV
+   *
+   * @param codec
+   * @tparam A
+   * @return
+   */
+  def sequence[A](codec: Codec[A]): Codec[A] =
+    tagged(TagClass.Universal, ConstructionType.Constructed, 16)(codec)
+
+  /**
+   * In order to be compliant with X.690, the codec
+   * param must encode a BER encoded TLV
+   *
+   * @param codec
+   * @tparam A
+   * @return
+   */
+  def sequenceOf[A](codec: Codec[A]): Codec[Vector[A]] =
+    tagged(TagClass.Universal, ConstructionType.Constructed, 16)(vector(codec))
+
+
+  /**
+   * In order to be compliant with X.690, the codec
+   * param must encode a BER encoded TLV
+   *
+   * NOTE: this does not enforce the semantics
+   * of a BER set, that is down to the construction
+   * of the underlying codec
+   *
+   * @param codec
+   * @tparam A
+   * @return
+   */
+  def set[A](codec: Codec[A]): Codec[A] =
+    tagged(TagClass.Universal, ConstructionType.Constructed, 17)(codec)
+
+  /**
+   * In order to be compliant with X.690, the codec
+   * param must encode a BER encoded TLV
+   *
+   * @param codec
+   * @tparam A
+   * @return
+   */
+  def setOf[A](codec: Codec[A]): Codec[Set[A]] =
+    tagged(TagClass.Universal, ConstructionType.Constructed, 17)(vector(codec)).xmap(
+      { _.toSet },
+      { _.toVector }
+    )
+
+  def enumerated[A](f: A => Int, g: Int => A): Codec[A] =
+    integer.xmap(g, f)
 }

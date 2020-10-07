@@ -1,0 +1,6 @@
+version: "3.8"
+services:
+  ldap:
+    image: "rroemhild/test-openldap"
+    ports:
+      - "389:389"
