@@ -1,11 +1,9 @@
 package wolfendale
 
-import org.scalatest._
-import matchers.must._
-import freespec._
+import org.scalatest.freespec._
+import org.scalatest.matchers.must._
 import scodec.Codec
 import scodec.bits.BitVector
-import wolfendale.ber.TagType
 
 trait EncodingAssertions { self: AnyFreeSpec with Matchers =>
 
