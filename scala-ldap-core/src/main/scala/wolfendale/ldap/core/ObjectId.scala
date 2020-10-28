@@ -10,7 +10,6 @@ final case class ObjectId(parts: Int*) {
 
 object ObjectId {
 
-  // TODO tests
   val codec: Codec[ObjectId] =
     ldapString.exmap(
       { string => Attempt.fromTry { Try {

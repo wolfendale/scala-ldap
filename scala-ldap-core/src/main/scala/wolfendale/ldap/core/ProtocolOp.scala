@@ -26,7 +26,6 @@ object BindRequest {
   val identifier: Identifier =
     Identifier(TagClass.Application, ConstructionType.Constructed, 0)
 
-  // TODO tests
   val codec: Codec[BindRequest] = (
     ber.integer ::
     ldapString ::
@@ -46,7 +45,6 @@ object BindResponse {
   val identifier: Identifier =
     Identifier(TagClass.Application, ConstructionType.Constructed, 1)
 
-  // TODO tests
   val codec: Codec[BindResponse] = (
     ResultCode.codec ::
     ldapString ::
@@ -61,7 +59,6 @@ object DelRequest {
   val identifier: Identifier =
     Identifier(TagClass.Application, ConstructionType.Primitive, 10)
 
-  // TODO tests
   val codec: Codec[DelRequest] =
     codecs.byteAligned(codecs.utf8).as[DelRequest]
 }
