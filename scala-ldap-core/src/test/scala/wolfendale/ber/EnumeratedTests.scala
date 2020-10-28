@@ -15,7 +15,7 @@ class EnumeratedTests extends AnyFreeSpec with Matchers with EncodingAssertions 
 
     val codec = enumerated[X.Value](_.id, X.apply)
 
-    "A" - mustEncode(codec, X.A, hex"02 01 00".bits)
-    "B" - mustEncode(codec, X.B, hex"02 01 01".bits)
+    "A" - mustEncode(codec, X.A, hex"0a 01 00".bits)
+    "B" - mustEncode(codec, X.B, hex"0a 01 01".bits)
   }
 }

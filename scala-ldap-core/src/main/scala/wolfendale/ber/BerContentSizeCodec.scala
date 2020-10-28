@@ -20,7 +20,6 @@ class BerContentSizeCodec[A](codec: Codec[A]) extends Codec[A] {
     inner(long, 1)
   }
 
-  // TODO tests
   private val lengthCodec: Codec[Long] = {
     bool.consume {
       case false => ulong(7)

@@ -4,26 +4,16 @@ import scodec._
 import scodec.bits._
 import scodec.codecs._
 
-import scala.annotation.tailrec
-import scala.util.Try
-
 package object ber {
 
-  private val tagNumberCodec: Codec[Int] = {
-    val longTag: Codec[Int] = (constant(bin"11111") ~ BerTagLengthCodec).exmap(
-      { case (_, int)        => Attempt.successful(int) },
-      { case int if int > 30 => Attempt.successful(() -> int)
-      case _               => Attempt.failure(Err("Invalid tag type length"))
-      }
-    )
-    choice(longTag, uint(5))
-  }
+  def tagged[A](identifier: Identifier)(codec: Codec[A]): Codec[A] =
+    Identifier.codec.unit(identifier) ~> new BerContentSizeCodec(codec)
 
   def tagged[A](tagClass: TagClass, constructionType: ConstructionType, tagNumber: Int)(codec: Codec[A]): Codec[A] =
-    TagClass.codec.unit(tagClass) ~>
-    ConstructionType.codec.unit(constructionType) ~>
-    tagNumberCodec.unit(tagNumber) ~>
-    new BerContentSizeCodec(codec)
+    tagged(Identifier(tagClass, constructionType, tagNumber))(codec)
+
+  def sized[A](codec: Codec[A]): Codec[A] =
+    new BerContentSizeCodec[A](codec)
 
   val boolean: Codec[Boolean] =
     tagged(TagClass.Universal, ConstructionType.Primitive, 1) {
@@ -38,25 +28,7 @@ package object ber {
     }
 
   val integer: Codec[Int] =
-    tagged(TagClass.Universal, ConstructionType.Primitive, 2) {
-      new Codec[Int] {
-
-        private val highPrefix = BitVector.high(9)
-        private val lowPrefix = BitVector.low(9)
-
-        @tailrec
-        private def shrink(bits: BitVector): BitVector =
-          if (bits.startsWith(highPrefix) || bits.startsWith(lowPrefix)) shrink(bits.drop(8)) else bits
-
-        override val sizeBound: SizeBound = SizeBound.bounded(8, 4 * 8)
-
-        override def encode(value: Int): Attempt[BitVector] =
-          Attempt.successful(shrink(BitVector.fromInt(value)))
-
-        override def decode(bits: BitVector): Attempt[DecodeResult[Int]] =
-          Attempt.fromTry(Try(bits.toInt(signed = true))).map(DecodeResult(_, BitVector.empty))
-      }
-    }
+    tagged(TagClass.Universal, ConstructionType.Primitive, 2)(BerIntegerCodec)
 
   def bitString[A](codec: Codec[A]): Codec[A] =
     tagged(TagClass.Universal, ConstructionType.Primitive, 3)(new Codec[A] {
@@ -75,8 +47,10 @@ package object ber {
         decoder.decode(bits)
     })
 
-  def octetString[A](codec: Codec[A]): Codec[A] =
-    tagged(TagClass.Universal, ConstructionType.Primitive, 4)(byteAligned(codec))
+  def octetString[A](
+                      codec: Codec[A],
+                      identifier: Identifier = Identifier(TagClass.Universal, ConstructionType.Primitive, 4)
+                    ): Codec[A] = tagged(identifier)(byteAligned(codec))
 
   def berNull: Codec[Unit] =
     tagged(TagClass.Universal, ConstructionType.Primitive, 5)(provide(()))
@@ -100,9 +74,10 @@ package object ber {
    * @tparam A
    * @return
    */
-  def sequenceOf[A](codec: Codec[A]): Codec[Vector[A]] =
-    tagged(TagClass.Universal, ConstructionType.Constructed, 16)(vector(codec))
-
+  def sequenceOf[A](
+                     codec: Codec[A],
+                     identifier: Identifier = Identifier(TagClass.Universal, ConstructionType.Constructed, 16)
+                   ): Codec[Vector[A]] = tagged(identifier)(vector(codec))
 
   /**
    * In order to be compliant with X.690, the codec
@@ -134,5 +109,5 @@ package object ber {
     )
 
   def enumerated[A](f: A => Int, g: Int => A): Codec[A] =
-    integer.xmap(g, f)
+    tagged(TagClass.Universal, ConstructionType.Primitive, 10)(BerIntegerCodec.xmap(g, f))
 }
