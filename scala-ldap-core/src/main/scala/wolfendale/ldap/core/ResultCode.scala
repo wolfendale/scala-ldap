@@ -50,7 +50,6 @@ object ResultCode extends IntEnum[ResultCode] {
   case object AffectsMultipleDsas extends ResultCode(71, "affectsMultipleDSAs")
   case object Other extends ResultCode(80, "other")
 
-  // TODO tests
   val codec: Codec[ResultCode] =
     ber.enumerated[ResultCode](_.value, ResultCode.withValue)
 }
